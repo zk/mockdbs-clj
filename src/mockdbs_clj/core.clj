@@ -1,13 +1,14 @@
 (ns mockdbs-clj.core
   (:import [javax.swing JLabel JPanel JFrame JTextField]
-	   [javax.swing.event DocumentListener]
+	   [java.awt.event ActionListener]
+	   [javax.swing.event DocumentListener ChangeListener]
 	   [java.awt GridBagLayout GridBagConstraints Insets]
 	   [java.awt BorderLayout Color Font] 
 	   [javax.swing JFrame JButton JSlider JPanel JLabel]
 	   [com.explodingpixels.macwidgets MacUtils UnifiedToolBar MacWidgetFactory BottomBarSize BottomBar]
 	   [edu.umd.cs.piccolo PCanvas PLayer PNode]
 	   [edu.umd.cs.piccolo.nodes PPath]
-	   [edu.umd.cs.piccolo.event PZoomEventHandler PInputEvent]
+	   [edu.umd.cs.piccolo.event PZoomEventHandler PInputEvent PDragSequenceEventHandler]
 	   [edu.umd.cs.piccolo.util PPaintContext]))
 
 ;;import edu.umd.cs.piccolo.event.PBasicInputEventHandler;
@@ -15,7 +16,20 @@
 ;;import edu.umd.cs.piccolo.event.PInputEventListener;
 ;;import edu.umd.cs.piccolo.util.PPaintContext;
 
-(def neurons (ref #{}))
+(def *neurons* (ref #{}))
+(def *depth* (atom 20.0))
+(def *depth-callbacks* (ref []))
+(def *canvas* (mk-canvas))
+
+(defn register-depth-callback [f]
+  (dosync
+   (alter *depth-callbacks* conj f)))
+
+(defn update-depth [new-depth]
+  (reset! *depth* new-depth)
+  (doseq [f @*depth-callbacks*]
+    (f new-depth))
+  @*depth*)
 
 (defn neuron [& traits]
   (merge 
@@ -32,24 +46,27 @@
       (assoc n :depth (first depth))
       n)))
 
-(defn get-neurons [] @neurons)
+(defn get-neurons [] @*neurons*)
 
 (defn add-neuron [n]
   (dosync
-   (alter neurons conj n)))
+   (alter *neurons* conj n)))
 
 (defn remove-neuron [n]
   (dosync
-   (alter neurons disj n)))
+   (alter *neurons* disj n)))
 
 (defn clear-neurons []
   (dosync
-   (ref-set neurons #{})))
+   (ref-set *neurons* #{})))
 
-
-(defn mk-button [text]
-  (doto (JButton. text)
-    (.putClientProperty "JButton.buttonType" "textured")))
+(defn mk-button [text on-click]
+  (let [button (JButton. text)]
+    (doto button
+      (.putClientProperty "JButton.buttonType" "textured")
+      (.addActionListener
+       (proxy [ActionListener] []
+	 (actionPerformed [evt] (on-click evt button)))))))
 
 (defn mk-zoomhandler [] 
   (proxy [PZoomEventHandler] []
@@ -72,44 +89,78 @@
 	    (.getY zoom-point))))))))
 
 (defn init-toolbar [toolbar]
-  (let [thal (mk-button "Thalamus")
-	stn (mk-button "STN")
-	snr (mk-button "SNr")]
+  (let [thal (mk-button "Thalamus" (fn [evt button] (.addChild (.getLayer *canvas*) (mk-neuron {:color Color/BLUE}))))
+	stn (mk-button "STN" (fn [evt button] (.addChild (.getLayer *canvas*) (mk-neuron {:color Color/RED}))))
+	snr (mk-button "SNr" (fn [evt button] (.addChild (.getLayer *canvas*) (mk-neuron {:color Color/GREEN}))))]
     (.addComponentToRight toolbar thal)
     (.addComponentToRight toolbar stn)
     (.addComponentToRight toolbar snr)))
 
+;; Controls
+
+(defn mk-slider [opts]
+  (let [direction (get opts :direction JSlider/VERTICAL)
+	on-change (get opts :on-change (fn [evt slider]))
+	min (get opts :min 0)
+	max (get opts :max 10)
+	steps (get opts :steps 1)
+	start-value (get opts :start-value 0)
+	focusable (get opts :focusable true)
+	slider (JSlider. direction)]
+    (doto slider
+      (.setMaximum max)
+      (.setMinimum min)
+      (.setValue start-value)
+      (.setFocusable true)
+      (.addChangeListener 
+       (proxy [ChangeListener] [] 
+	 (stateChanged [ce] (on-change ce slider)))))))
+
 (defn mk-depth-panel []
   (let [panel (JPanel.)
-	slider (JSlider. JSlider/VERTICAL)]
+	slider (mk-slider 
+		{:max 20000
+		 :min -10000
+		 :start-value 20000
+		 :on-change #(update-depth (/ (.getValue %2) 1000.0))})]
     (.setLayout panel (BorderLayout.))
     (.setBackground panel (Color/WHITE))
     (.add panel slider BorderLayout/CENTER)
-    (.setMaximum slider 20000)
-    (.setMinimum slider -10000)
-    (.setValue slider 20000)
-    (.setFocusable slider true)
-
     panel))
 
-(defn mk-neuron []
-  (PPath/createEllipse 25 25 12.5 12.5))
+(defn mk-neuron [attrs]
+  (let [attrs (merge {:diameter 25
+		      :color Color/WHITE} attrs)
+	diameter (:diameter attrs)
+	color (:color attrs)
+	neuron (PPath/createEllipse diameter diameter (/ diameter 2) (/ diameter 2))]
+    (.setPaint neuron color)
+    neuron))
 
 (defn mk-canvas []
-  (let [canvas (PCanvas.)]
+  (let [canvas (PCanvas.)
+	node-drag-handler (proxy [PDragSequenceEventHandler] []
+			    (drag [evt]
+				  (let [node (.getPickedNode evt)]
+				    (.translate node (.width (.getDelta evt)) (.height (.getDelta evt))))))]
     (.setZoomEventHandler canvas (mk-zoomhandler))
-    (.addChild (.getLayer canvas) (mk-neuron))
     (.setAnimatingRenderQuality canvas PPaintContext/HIGH_QUALITY_RENDERING)
     (.setInteractingRenderQuality canvas PPaintContext/HIGH_QUALITY_RENDERING)
+    (.addInputEventListener (.getLayer canvas) node-drag-handler)
+    (.setMarksAcceptedEventsAsHandled (.getEventFilter node-drag-handler) true)
     canvas))
 
 (defn mk-bottom-bar []
   (let [bar (BottomBar. BottomBarSize/LARGE)
-	depth (JLabel. "0.00 mm")
-	noise-slider (JSlider. JSlider/HORIZONTAL)
+	depth-label (JLabel. "0.00 mm")
+	noise-slider (mk-slider {:direction JSlider/HORIZONTAL
+				 :max 100})
 	noise-label (JLabel. "Noise")]
-    (.setFont depth (Font. "Arial" Font/PLAIN 30))
-    (.addComponentToCenter bar depth)
+    (register-depth-callback 
+     (fn [new-depth]
+       (.setText depth-label (format "%+2.2f mm" new-depth))))
+    (.setFont depth-label (Font. "Arial" Font/PLAIN 30))
+    (.addComponentToCenter bar depth-label)
     (.addComponentToRight bar noise-label)
     (.addComponentToRight bar noise-slider)
     (.getComponent bar)))
@@ -124,7 +175,7 @@
     (.setLocationRelativeTo frame nil)
     (init-toolbar toolbar)
     (.add frame (mk-depth-panel) BorderLayout/EAST)
-    (.add frame (mk-canvas) BorderLayout/CENTER)
+    (.add frame *canvas* BorderLayout/CENTER)
     (.add frame (mk-bottom-bar) BorderLayout/SOUTH)
     frame))
 
@@ -132,6 +183,12 @@
   (.setVisible frame true)
   frame)
 
+(do
+  (def *canvas* (mk-canvas))
+  (dosync
+   (ref-set *depth-callbacks* []))
+  (show (mk-frame))
+  (update-depth 20.0))
 (def fr (show (mk-frame)))
 
 #_(.setDefaultCloseOperation frame JFrame/EXIT_ON_CLOSE)
