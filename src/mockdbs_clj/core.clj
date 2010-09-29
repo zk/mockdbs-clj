@@ -3,11 +3,12 @@
 	   [java.awt.event ActionListener]
 	   [javax.swing.event DocumentListener ChangeListener]
 	   [java.awt GridBagLayout GridBagConstraints Insets]
-	   [java.awt BorderLayout Color Font] 
+	   [java.awt BorderLayout Color Font BasicStroke] 
+	   [java.awt.geom Point2D$Double]
 	   [javax.swing JFrame JButton JSlider JPanel JLabel]
 	   [com.explodingpixels.macwidgets MacUtils UnifiedToolBar MacWidgetFactory BottomBarSize BottomBar]
 	   [edu.umd.cs.piccolo PCanvas PLayer PNode]
-	   [edu.umd.cs.piccolo.nodes PPath]
+	   [edu.umd.cs.piccolo.nodes PPath PText]
 	   [edu.umd.cs.piccolo.event PZoomEventHandler PInputEvent PDragSequenceEventHandler]
 	   [edu.umd.cs.piccolo.util PPaintContext]))
 
@@ -17,19 +18,48 @@
 ;;import edu.umd.cs.piccolo.util.PPaintContext;
 
 (def *neurons* (ref #{}))
-(def *depth* (atom 20.0))
-(def *depth-callbacks* (ref []))
-(def *canvas* (mk-canvas))
 
-(defn register-depth-callback [f]
-  (dosync
-   (alter *depth-callbacks* conj f)))
+(defmacro defbindable 
+  "Creates the infrastucture for binding or watching a ref.
+   There are several vars that are created as a result of
+   using this macro:
 
-(defn update-depth [new-depth]
-  (reset! *depth* new-depth)
-  (doseq [f @*depth-callbacks*]
-    (f new-depth))
-  @*depth*)
+
+   ex. (defbindable depth 10) creates the following:
+
+   depth-ref - ref with value of 10
+   depth-callbacks - a list of fns to call when depth changes
+   clear-depth-callbacks - resets the callbacks var to []
+   watch-depth - (watch-depth my-fn) will execute my-fn when
+                 depth changes
+   set-depth - (set-depth 50) will set depth to 50 and
+                  execute all depth callbacks"
+  [name initial-value]
+  (let [ref-name (symbol (str name "-ref"))
+	callbacks-name (symbol (str name "-callbacks"))
+	clear-callbacks-name (symbol (str "clear-" name "-callbacks"))
+	watch-name (symbol (str "watch-" name))
+	set-name (symbol (str "set-" name))]
+    `(do
+       (def ~ref-name (ref ~initial-value))
+       (def ~callbacks-name (ref []))
+       (defn ~watch-name [f#]
+	 (dosync
+	  (alter ~callbacks-name conj f#)))
+       (defn ~set-name [new-val#]
+	 (dosync
+	  (ref-set ~ref-name new-val#))
+	 (doseq [f# @~callbacks-name]
+	   (f# @~ref-name))
+	 @~ref-name)
+       (defn ~clear-callbacks-name []
+	 (dosync
+	  (ref-set ~callbacks-name []))))))
+
+
+(defbindable depth 20)
+(defbindable noise 0)
+
 
 (defn neuron [& traits]
   (merge 
@@ -88,10 +118,76 @@
 	    (.getX zoom-point) 
 	    (.getY zoom-point))))))))
 
+(defn mk-neuron-path [attrs]
+  (let [attrs (merge {:diameter 25
+		      :color Color/WHITE} attrs)
+	node (PNode.)
+	diameter (:diameter attrs)
+	color (:color attrs)
+	neuron (PPath/createEllipse (- (/ diameter 2)) (- (/ diameter 2)) diameter diameter)]
+    (.addChild node neuron)
+    (.setPaint neuron color)
+    (.addChild node (PPath/createEllipse -2.5 -2.5 5 5))
+    node))
+
+(defn hex-to-color [hex-string-no-pound]
+  (try
+   (Color/decode hex-string-no-pound)
+   (catch Exception e Color/WHITE)))
+
+(defn lookup-color [color]
+  (let [color-map {:white Color/WHITE
+		   :black Color/BLACK
+		   :red Color/RED
+		   :green Color/GREEN
+		   :blue Color/BLUE}
+	c (color-map color)
+	c (if c c
+	      (hex-to-color (str "#" (name color))))]
+    c))
+
+(defn mk-probe []
+  (let [node (PNode.)
+	track (PPath/createLine 0 -1000 0 2000)
+	probe (PPath/createLine 0 0 0 -3000)]
+    (.setStroke track (BasicStroke. 3))
+    (.setPaint track (Color/lightGray))
+    (.setStrokePaint track (Color/lightGray))
+
+    (.setStroke probe (BasicStroke. 5))
+    (.setOffset probe (Point2D$Double. 0 -2000))
+    (.addChild node track)
+    (.addChild node probe)
+
+    (doseq [i (range -20 10)]
+      (let [text (PText. (str (- i) "mm"))]
+	(.setFont text (Font. "Arial" Font/PLAIN 16))
+	(.setOffset text (Point2D$Double. 30 (* i 100)))
+	(.setTextPaint text Color/lightGray)
+	(.addChild node text)))
+
+    (watch-depth
+     (fn [depth] 
+       (println depth) 
+       (.setOffset probe (Point2D$Double. 0 (* 100 (- depth))))))
+
+    (.rotate node (* (/ Math/PI 360) 30))
+    node))
+
+
+(defn mk-neuron [attrs]
+  (let [type (get attrs :type :generic)
+	color (lookup-color (get attrs :color :white))]
+    {:type type
+     :color color
+     :path (mk-neuron-path {:color color})}))
+
+(def *paths-to-neuron* (atom {}))
+
 (defn init-toolbar [toolbar]
-  (let [thal (mk-button "Thalamus" (fn [evt button] (.addChild (.getLayer *canvas*) (mk-neuron {:color Color/BLUE}))))
-	stn (mk-button "STN" (fn [evt button] (.addChild (.getLayer *canvas*) (mk-neuron {:color Color/RED}))))
-	snr (mk-button "SNr" (fn [evt button] (.addChild (.getLayer *canvas*) (mk-neuron {:color Color/GREEN}))))]
+  (let [thal (mk-button "Thalamus" (fn [evt button] (add-neuron {:type :thalamus :color :blue})))
+	stn (mk-button "STN" (fn [evt button] (add-neuron {:type :stn :color :red})))
+	snr (mk-button "SNr" (fn [evt button] (add-neuron {:type :snr :color :green})))]
     (.addComponentToRight toolbar thal)
     (.addComponentToRight toolbar stn)
     (.addComponentToRight toolbar snr)))
@@ -122,41 +218,51 @@
 		{:max 20000
 		 :min -10000
 		 :start-value 20000
-		 :on-change #(update-depth (/ (.getValue %2) 1000.0))})]
+		 :on-change #(set-depth (/ (.getValue %2) 1000.0))})]
     (.setLayout panel (BorderLayout.))
     (.setBackground panel (Color/WHITE))
     (.add panel slider BorderLayout/CENTER)
     panel))
 
-(defn mk-neuron [attrs]
-  (let [attrs (merge {:diameter 25
-		      :color Color/WHITE} attrs)
-	diameter (:diameter attrs)
-	color (:color attrs)
-	neuron (PPath/createEllipse diameter diameter (/ diameter 2) (/ diameter 2))]
-    (.setPaint neuron color)
-    neuron))
-
 (defn mk-canvas []
   (let [canvas (PCanvas.)
 	node-drag-handler (proxy [PDragSequenceEventHandler] []
 			    (drag [evt]
-				  (let [node (.getPickedNode evt)]
-				    (.translate node (.width (.getDelta evt)) (.height (.getDelta evt))))))]
+				  (let [node (.getPickedNode evt)
+					node (loop [n (.getParent node)]
+					       (if (nil? n)
+						 nil
+						 (if (@*paths-to-neuron* n)
+						   (:path (@*paths-to-neuron* n))
+						   (recur (.getParent n)))))]
+				    (when node
+				      (.translate node (.width (.getDelta evt)) (.height (.getDelta evt)))
+				      (.setHandled evt true)))))]
     (.setZoomEventHandler canvas (mk-zoomhandler))
     (.setAnimatingRenderQuality canvas PPaintContext/HIGH_QUALITY_RENDERING)
     (.setInteractingRenderQuality canvas PPaintContext/HIGH_QUALITY_RENDERING)
     (.addInputEventListener (.getLayer canvas) node-drag-handler)
-    (.setMarksAcceptedEventsAsHandled (.getEventFilter node-drag-handler) true)
+    (.setViewOffset (.getCamera canvas) 1000/2 700/2)
     canvas))
+
+(def *canvas* (mk-canvas))
+
+(defn add-to-canvas [path]
+  (.addChild (.getLayer *canvas*) path))
+
+(defn add-neuron [attrs]
+  (let [neuron (mk-neuron attrs)]
+    (swap! *paths-to-neuron* assoc (:path neuron) neuron)
+    (add-to-canvas (:path neuron))))
 
 (defn mk-bottom-bar []
   (let [bar (BottomBar. BottomBarSize/LARGE)
 	depth-label (JLabel. "0.00 mm")
 	noise-slider (mk-slider {:direction JSlider/HORIZONTAL
-				 :max 100})
+				 :max 100
+				 :on-change #(set-noise (/ (.getValue %2) 100.0))})
 	noise-label (JLabel. "Noise")]
-    (register-depth-callback 
+    (watch-depth 
      (fn [new-depth]
        (.setText depth-label (format "%+2.2f mm" new-depth))))
     (.setFont depth-label (Font. "Arial" Font/PLAIN 30))
@@ -169,7 +275,7 @@
   (let [frame (JFrame.)
 	toolbar (UnifiedToolBar.)]
     (MacUtils/makeWindowLeopardStyle (.getRootPane frame))
-    (.setSize frame 800 600)
+    (.setSize frame 1000 700)
     (.add frame (.getComponent toolbar) BorderLayout/NORTH)
     (.installWindowDraggerOnWindow toolbar frame)
     (.setLocationRelativeTo frame nil)
@@ -185,10 +291,9 @@
 
 (do
   (def *canvas* (mk-canvas))
-  (dosync
-   (ref-set *depth-callbacks* []))
+  (clear-depth-callbacks)
+  (add-to-canvas (mk-probe))
   (show (mk-frame))
-  (update-depth 20.0))
-(def fr (show (mk-frame)))
+  (set-depth 20.0))
 
 #_(.setDefaultCloseOperation frame JFrame/EXIT_ON_CLOSE)
