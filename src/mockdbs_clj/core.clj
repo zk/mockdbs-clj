@@ -1,4 +1,5 @@
 (ns mockdbs-clj.core
+  (:require [mockdbs-clj.widgets :as wd])
   (:import [javax.swing JLabel JPanel JFrame JTextField]
 	   [java.awt.event ActionListener]
 	   [javax.swing.event DocumentListener ChangeListener]
@@ -6,11 +7,18 @@
 	   [java.awt BorderLayout Color Font BasicStroke] 
 	   [java.awt.geom Point2D$Double]
 	   [javax.swing JFrame JButton JSlider JPanel JLabel]
-	   [com.explodingpixels.macwidgets MacUtils UnifiedToolBar MacWidgetFactory BottomBarSize BottomBar]
+	   (com.explodingpixels.macwidgets MacUtils
+                                           UnifiedToolBar
+                                           MacWidgetFactory
+                                           BottomBarSize
+                                           BottomBar)
 	   [edu.umd.cs.piccolo PCanvas PLayer PNode]
 	   [edu.umd.cs.piccolo.nodes PPath PText]
-	   [edu.umd.cs.piccolo.event PZoomEventHandler PInputEvent PDragSequenceEventHandler]
-	   [edu.umd.cs.piccolo.util PPaintContext]))
+	   (edu.umd.cs.piccolo.event PZoomEventHandler
+                                     PInputEvent
+                                     PDragSequenceEventHandler)
+	   [edu.umd.cs.piccolo.util PPaintContext]
+           [mockdbs_clj BirdsEyeView]))
 
 ;;import edu.umd.cs.piccolo.event.PBasicInputEventHandler;
 ;;import edu.umd.cs.piccolo.event.PInputEvent;
@@ -98,6 +106,13 @@
        (proxy [ActionListener] []
 	 (actionPerformed [evt] (on-click evt button)))))))
 
+(defn zoom [camera zoom-point scale-delta]
+  (.scaleViewAboutPoint
+   camera
+   scale-delta
+   (.getX zoom-point)
+   (.getY zoom-point)))
+
 (defn mk-zoomhandler [] 
   (proxy [PZoomEventHandler] []
     (getMinScale [] 0)
@@ -112,11 +127,7 @@
 	     current-scale (.getViewScale camera)
 	     new-scale (* current-scale scale-delta)]
 	 (when (and (> new-scale 0.001) (< new-scale Double/MAX_VALUE))
-	   (.scaleViewAboutPoint 
-	    camera 
-	    scale-delta 
-	    (.getX zoom-point) 
-	    (.getY zoom-point))))))))
+           (zoom camera zoom-point scale-delta)))))))
 
 (defn mk-neuron-path [attrs]
   (let [attrs (merge {:diameter 25
@@ -184,13 +195,38 @@
 
 (def *paths-to-neuron* (atom {}))
 
+(defn toolbar [& opts]
+  (let [opts (apply hash-map opts)
+        tb (UnifiedToolBar.)]
+    (doseq [l (:left opts)]
+      (.addComponentToLeft tb l))
+    (doseq [r (:right opts)]
+      (.addComponentToRight tb r))
+    tb))
+
+(defn mk-toolbar []
+  (let [thal (mk-button "Thalamus" (fn [evt button] (add-neuron {:type :thalamus :color :blue})))
+	stn (mk-button "STN" (fn [evt button] (add-neuron {:type :stn :color :red})))
+	snr (mk-button "SNr" (fn [evt button] (add-neuron {:type :snr :color :green})))
+        zoom-in (mk-button "+" (fn [evt button]
+                                 ))
+        zoom-out (mk-button "-" (fn [evt button]))]
+    (toolbar :left [thal stn snr]
+             :right [zoom-in zoom-out])))
+
+
 (defn init-toolbar [toolbar]
   (let [thal (mk-button "Thalamus" (fn [evt button] (add-neuron {:type :thalamus :color :blue})))
 	stn (mk-button "STN" (fn [evt button] (add-neuron {:type :stn :color :red})))
-	snr (mk-button "SNr" (fn [evt button] (add-neuron {:type :snr :color :green})))]
-    (.addComponentToRight toolbar thal)
-    (.addComponentToRight toolbar stn)
-    (.addComponentToRight toolbar snr)))
+	snr (mk-button "SNr" (fn [evt button] (add-neuron {:type :snr :color :green})))
+        zoom-in (mk-button "+" (fn [evt button]
+                                 ))
+        zoom-out (mk-button "-" (fn [evt button]))]
+    (.addComponentToLeft toolbar thal)
+    (.addComponentToLeft toolbar stn)
+    (.addComponentToLeft toolbar snr)
+    (.addComponentToRight toolbar zoom-in)
+    (.addComponentToRight toolbar zoom-out)))
 
 ;; Controls
 
@@ -237,7 +273,11 @@
 						   (recur (.getParent n)))))]
 				    (when node
 				      (.translate node (.width (.getDelta evt)) (.height (.getDelta evt)))
-				      (.setHandled evt true)))))]
+				      (.setHandled evt true)))))
+        bev (BirdsEyeView.)]
+    (.connect bev canvas (into-array PLayer [(.getLayer canvas)]))
+    (.setOffset (.getCamera bev) 10 10)
+    (.addChild (.getCamera canvas) (.getCamera bev))
     (.setZoomEventHandler canvas (mk-zoomhandler))
     (.setAnimatingRenderQuality canvas PPaintContext/HIGH_QUALITY_RENDERING)
     (.setInteractingRenderQuality canvas PPaintContext/HIGH_QUALITY_RENDERING)
@@ -256,6 +296,53 @@
     (add-to-canvas (:path neuron))))
 
 (defn mk-bottom-bar []
+  (let [depth-label (JLabel. "0.00 mm")
+	noise-slider (mk-slider {:direction JSlider/HORIZONTAL
+				 :max 100
+				 :on-change #(set-noise (/ (.getValue %2) 100.0))})
+	noise-label (JLabel. "Noise")]
+    (watch-depth 
+     (fn [new-depth]
+       (.setText depth-label (format "%+2.2f mm" new-depth))))
+    (.setFont depth-label (Font. "Arial" Font/PLAIN 30))
+    (.getComponent
+     (wd/bottom-bar :size :large
+                    :right [noise-label noise-slider]
+                    :center [depth-label]))))
+
+(defn mk-frame []
+  (wd/mac-frame :toolbar (mk-toolbar)
+                :bottombar (mk-bottom-bar)
+                :east (mk-depth-panel)
+                :center *canvas*))
+
+(defn show [frame]
+  (.setVisible frame true)
+  frame)
+
+(do
+  (def *canvas* (mk-canvas))
+  (clear-depth-callbacks)
+  (add-to-canvas (mk-probe))
+  (show (mk-frame))
+  (set-depth 20.0))
+
+#_(.setDefaultCloseOperation frame JFrame/EXIT_ON_CLOSE)
+#_(defn mk-frame []
+  (let [frame (JFrame.)
+	toolbar (mk-toolbar)]
+    (MacUtils/makeWindowLeopardStyle (.getRootPane frame))
+    (.setSize frame 1000 700)
+    (.add frame (.getComponent toolbar) BorderLayout/NORTH)
+    (.installWindowDraggerOnWindow toolbar frame)
+    (.setLocationRelativeTo frame nil)
+    (.add frame (mk-depth-panel) BorderLayout/EAST)
+    (.add frame *canvas* BorderLayout/CENTER)
+    (.add frame (mk-bottom-bar) BorderLayout/SOUTH)
+    frame))
+
+
+#_(defn mk-bottom-bar []
   (let [bar (BottomBar. BottomBarSize/LARGE)
 	depth-label (JLabel. "0.00 mm")
 	noise-slider (mk-slider {:direction JSlider/HORIZONTAL
@@ -271,29 +358,3 @@
     (.addComponentToRight bar noise-slider)
     (.getComponent bar)))
 
-(defn mk-frame []
-  (let [frame (JFrame.)
-	toolbar (UnifiedToolBar.)]
-    (MacUtils/makeWindowLeopardStyle (.getRootPane frame))
-    (.setSize frame 1000 700)
-    (.add frame (.getComponent toolbar) BorderLayout/NORTH)
-    (.installWindowDraggerOnWindow toolbar frame)
-    (.setLocationRelativeTo frame nil)
-    (init-toolbar toolbar)
-    (.add frame (mk-depth-panel) BorderLayout/EAST)
-    (.add frame *canvas* BorderLayout/CENTER)
-    (.add frame (mk-bottom-bar) BorderLayout/SOUTH)
-    frame))
-
-(defn show [frame]
-  (.setVisible frame true)
-  frame)
-
-(do
-  (def *canvas* (mk-canvas))
-  (clear-depth-callbacks)
-  (add-to-canvas (mk-probe))
-  (show (mk-frame))
-  (set-depth 20.0))
-
-#_(.setDefaultCloseOperation frame JFrame/EXIT_ON_CLOSE)
